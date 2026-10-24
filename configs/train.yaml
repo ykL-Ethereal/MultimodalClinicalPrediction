@@ -1,0 +1,41 @@
+# Final fixed cohort: raw numerical values; standardization is fitted on training patients.
+data:
+  root: ../data/Mutimodel_data/固定训练数据
+  horizon: 6  # Fixed cohort supports 1, 2, 3, 6; one task per run.
+text:
+  backend: macbert
+  model_name: hfl/chinese-macbert-base
+  revision: main  # Resolved immutable weight revision + tokenizer hash saved in artifact.
+  max_tokens: 512
+  batch_size: 16
+  cache_dir: ../runs/macbert_cache
+  device: cuda:0  # PyTorch 2.6.0 + CUDA 12.4
+model:
+  vital_encoder: tcn  # Set per experiment from training.models.
+  rnn_hidden: 64
+  rnn_layers: 2  # LSTM/GRU only; GRU-D uses one decay cell layer.
+  fusion: gated
+  embedding_dim: 128
+  static_dim: 32
+  tcn_channels: 64
+  tcn_blocks: 5
+  kernel_size: 3
+  max_time_steps: 120
+  lab_hidden: 256
+  dropout: 0.1
+  modality_dropout: 0.1
+training:
+  models: [tcn, lstm, gru, grud]  # Add grud to run the missingness-aware variant.
+  seed: 42
+  batch_size: 16
+  epochs: 50
+  patience: 8
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  class_weight: false
+  calibration: false
+  threshold: null
+  device: cuda:0  # PyTorch 2.6.0 + CUDA 12.4
+  output_dir: ../runs  # Each run creates <model>/<timestamp>/ here.
+
