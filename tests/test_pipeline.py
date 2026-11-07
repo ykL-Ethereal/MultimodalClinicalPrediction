@@ -45,7 +45,7 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(predictor.config.model.vital_encoder, name)
                 selected = torch.load(artifact.parent / 'best.pt', map_location='cpu', weights_only=True)
                 for key, value in predictor.model.state_dict().items():
-                    torch.testing.assert_close(value, selected[key], atol=0, rtol=0)
+                    torch.testing.assert_close(value.cpu(), selected[key], atol=0, rtol=0)
                 a = predictor.predict(self.bundle, rows=[5, 0], batch_size=2)
                 b = Predictor(artifact).predict(self.bundle, rows=[5, 0], batch_size=1)
                 np.testing.assert_allclose([x['risk'] for x in a], [x['risk'] for x in b], rtol=1e-5, atol=1e-6)
@@ -135,12 +135,13 @@ class PipelineTests(unittest.TestCase):
     def test_calibration_requires_distinct_patients(self):
         cfg = deepcopy(self.config)
         cfg.training.calibration = True
-        with self.assertRaisesRegex(ValueError, 'two validation patients'):
+        with self.assertRaisesRegex(ValueError, '2 validation patients'):
             validation_partition(self.bundle, cfg)
         # Test the partition contract with two distinct validation patients.
         bundle = deepcopy(self.bundle)
         bundle.metadata.loc[3, 'patient_id'] = 'OTHER'
-        selection, calibration = validation_partition(bundle, cfg)
+        selection, calibration, threshold = validation_partition(bundle, cfg)
+        self.assertEqual(len(threshold), 0)
         self.assertTrue(set(bundle.metadata.iloc[selection].patient_id).isdisjoint(bundle.metadata.iloc[calibration].patient_id))
         self.assertEqual(sorted(np.concatenate([selection, calibration])), bundle.rows('validation').tolist())
 
@@ -167,7 +168,7 @@ class PipelineTests(unittest.TestCase):
         cfg = load_config(root / 'configs/train.yaml')
         self.assertEqual(Path(cfg.data.root), root / 'data/Mutimodel_data/固定训练数据')
         self.assertTrue((Path(cfg.data.root) / 'dataset_schema.json').is_file())
-        self.assertEqual(cfg.training.models, ['tcn', 'lstm', 'gru'])
+        self.assertEqual(cfg.training.models, ['tcn', 'lstm', 'gru', 'grud', 'news2'])
         for raw in ({'data': {'horizon':24}}, {'text': {'backend':'demo'}}, {'data': {'mode':'raw_records'}},
                     {'training': {'models':['gru','gru']}}, {'model': {'vital_encoder':'unknown'}}):
             with self.assertRaises(ValueError):

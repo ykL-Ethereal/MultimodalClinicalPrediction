@@ -1,5 +1,25 @@
 # 验证
 
+## 2026-10-29 体征单模态验证
+
+最终完整回归：在 MCP 环境（Python 3.10.22、PyTorch 2.11.0+cu128、可用 CUDA）使用项目内全新专用临时目录运行 `pytest -q -p no:cacheprovider --basetemp <新临时目录>`，结果为 **131 passed，1 skipped，100.81 秒**。覆盖原有多模态、NEWS2 及新增单模态路径；唯一跳过项为缺少 XGBoost 依赖的实际树模型集成测试。
+
+新增 `tests/test_vital_only.py` 覆盖 20 通道与多模态体征预处理的数值一致性、CPU/CUDA 一致性、训练集专属统计拟合、四种编码器单模态训练/保存/重载、缺少检验和病历文件时的独立推理、全体征缺失、逐样本预测 CSV、无标签推理、CLI 模型选择，以及 XGBoost 的 2400 维展平顺序和磁盘特征缓存。初次定向运行结果为 **14 passed，1 skipped，44.60 秒**。
+
+当前 MCP 环境没有 XGBoost，依赖安装请求未获批准，因此实际 XGBoost 外存训练/制品重载测试暂时跳过；特征生成检查已执行。不能据此宣称 XGBoost 训练链路已实测通过。安装 `requirements.txt` 中的 XGBoost 后执行 `python -B -m pytest tests/test_vital_only.py -q -p no:cacheprovider`，该集成测试会自动启用。
+
+真实数据只读抽样：训练集前三名患者各取最多四个窗口，共 12 个；仅用这些训练窗口拟合临时体征统计，得到 `[12,120,20]`，展平得到 `[12,2400]`。TCN/LSTM/GRU/GRU-D 的一次前向与反向均得到有限输出和梯度，耗时约 11.94 秒，进程峰值 RSS 约 0.94 GiB。记录为 `runs/vital_only_smoke_20261029.json`；未导出模型、未修改原始数据，也未进行完整队列训练或性能比较。
+
+Windows 沙箱的系统临时目录可能无法创建 pytest 子目录。可在项目 `runs/` 下指定一个全新的专用 `--basetemp` 目录运行回归；pytest 会清理该目录，因此不要指向已有实验输出。
+
+## 2026-10-25 GPU 验证结果
+
+在 `MCP` 环境（PyTorch 2.11.0+cu128、NVIDIA GeForce RTX 5060 Ti）执行全套测试：**117 passed，74.45 秒**。
+
+新增 CUDA 回归覆盖 TCN、LSTM、GRU、GRU-D 各一个 epoch 的混合精度训练、验证与制品重载；GPU/CPU 预测近似一致；训练专属统计拟合一致；批次标准化、缺测掩码及时间/质量特征与 CPU 参考实现一致；FP16 梯度缩放、融合 AdamW、锁页内存和 CUDA 张量传输；不同设备/精度的文本缓存隔离及缓存命中一致性。无 CUDA 时跳过 GPU 专属检查，同时保留自动回退及显式 CUDA 不可用错误测试。
+
+测试使用六窗口固定格式夹具和本地微型 Bert，不下载模型，也未启动正式全队列训练。默认配置启用自动混合精度和 cuDNN 调优；需要确定性实验时设置 `training.deterministic: true`，需要全精度时将两处 `precision` 设置为 `float32`。本次验证确认 GPU 路径可用，未测量正式数据上的端到端加速倍数。
+
 在安装依赖的环境执行：
 
 ```bash
@@ -10,7 +30,7 @@ python -B -m pytest -q -p no:cacheprovider
 
 集成测试使用相同固定格式的六窗口夹具和本地微型 Bert 权重，避免外部下载；它们验证流程正确性，不衡量正式预测效果。测试产物自动删除。真实包装数据的抽样前向验证与单步梯度检查独立于这些夹具进行，不会修改正式数据或启动完整训练。
 
-完整包校验可执行 `python main.py --validate-only`；其会扫描全部分片和病历。完整训练使用 `python main.py`，默认顺序运行三种基线，可在配置中加入 `grud`。
+完整包校验可执行 `python main.py --validate-only`；其会扫描全部分片和病历。当前默认入口依次运行 TCN/LSTM/GRU/GRU-D 和 NEWS2；仅体征模式使用 `python main.py --vital_only`，校验时加 `--validate-only` 只扫描体征所需字段。
 
 ## 2026-10-24 验证结果
 

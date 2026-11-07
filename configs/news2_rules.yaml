@@ -1,0 +1,47 @@
+version: news2-reduced-v2
+source:
+  article: Haj Husin et al., Cureus 17(2), e79610 (2025)
+  doi: 10.7759/cureus.79610
+  scoring: Figure 1 (SpO2 Scale 1)
+  alarm: Table 2, NEWS2 >= 2
+  adaptation: User-supplied upper-inclusive NEWS2 rules and available-variable normalization
+# No temperature, consciousness or supplemental-oxygen fields in the fixed cohort.
+omitted_parameters: [temperature, consciousness, supplemental_oxygen]
+# Latest usable value per parameter before prediction; no averaging of NEWS2 scores.
+time_selection: latest_available
+# Skip missing variables in both the numerator and the theoretical maximum.
+missing_policy: skip
+interval_closed: upper
+normalization: available_max
+alarm_threshold: 2
+parameters:
+  heart_rate:
+    unit: beats/min
+    sources:
+      - {value: hr, mask: hr_mask, available_when: 0}
+    # Inclusive upper limits; the final interval has an implicit +infinity bound.
+    cutpoints: [40, 50, 90, 110, 130]
+    scores: [3, 1, 0, 1, 2, 3]
+    max_score: 3
+  respiratory_rate:
+    unit: breaths/min
+    sources:
+      - {value: rr, mask: rr_mask, available_when: 0}
+    cutpoints: [8, 11, 20, 24]
+    scores: [3, 1, 0, 2, 3]
+    max_score: 3
+  oxygen_saturation:
+    unit: percent
+    sources:
+      - {value: spo2, mask: spo2_mask, available_when: 0}
+    cutpoints: [91, 93, 95]
+    scores: [3, 2, 1, 0]
+    max_score: 3
+  systolic_blood_pressure:
+    unit: mmHg
+    # last_mask denotes availability, including a reading before the 120-min window.
+    sources:
+      - {value: sbp_last, mask: sbp_last_mask, available_when: 1}
+    cutpoints: [90, 100, 110, 219]
+    scores: [3, 2, 1, 0, 3]
+    max_score: 3

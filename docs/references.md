@@ -1,5 +1,10 @@
 # 实现依据
 
+- [XGBoost Python API](https://xgboost.readthedocs.io/en/stable/python/python_api.html)：二维特征矩阵、原生模型保存/加载和指定最佳 iteration 范围预测。
+- [XGBoost external memory](https://xgboost.readthedocs.io/en/stable/tutorials/external_memory.html)：DataIter、ExtMemQuantileDMatrix、hist、验证矩阵引用训练量化切点。项目要求 >=3.1,<4，采用 CPU 外存页，预测按批进行。
+
+- [Haj Husin et al., Predicting COVID-19 Patient Disposition Using the National Early Warning Score 2: A Retrospective Cohort Study, Cureus, 2025](https://doi.org/10.7759/cureus.79610)：用户提供 PDF 的图 1 为 NEWS2 分值依据，表 2 提供原始分数 ≥2 报警阈值；后按用户代码更新为上限包含区间及可用项满分归一化，仅使用 HR、RR、SpO2、SBP。适配说明见 [news2.md](news2.md)，独立规则位于 `configs/news2_rules.yaml`。
+
 - [PyTorch LSTM](https://docs.pytorch.org/docs/stable/generated/torch.nn.LSTM.html)：复用 `nn.LSTM`，设置 `batch_first=True`、单向；多层 dropout 只作用于层间。
 - [PyTorch GRU](https://docs.pytorch.org/docs/stable/generated/torch.nn.GRU.html)：复用 `nn.GRU`，单向；官方候选状态的 reset 门顺序与原论文存在差别。
 - [Packed sequences](https://docs.pytorch.org/docs/stable/generated/torch.nn.utils.rnn.pack_padded_sequence.html)：LSTM/GRU 用于右侧填充；全空序列的占位步骤在输出处屏蔽。

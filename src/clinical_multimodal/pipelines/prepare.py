@@ -26,20 +26,27 @@ def prepare(config, *, encode_text=True):
     root = Path(config.data.root)
     if not (root / "dataset_schema.json").is_file():
         raise FileNotFoundError(f"Fixed data package not found: {root / 'dataset_schema.json'}")
-    bundle = FixedCohortBundle(root)
+    bundle = FixedCohortBundle(root, vital_only=config.model.vital_only)
     report = inspect_bundle(bundle, config.data.horizon)
     length = bundle.schema["history_minutes"]
     if length > config.model.max_time_steps:
         raise ValueError("Input time length exceeds model max_time_steps")
-    preprocessor = FixedNumericPreprocessor.fit(bundle, bundle.rows("train"))
+    if config.model.vital_only:
+        from ..preprocessing.vital_numeric import VitalNumericPreprocessor
+        processor = VitalNumericPreprocessor
+    else:
+        processor = FixedNumericPreprocessor
+    preprocessor = processor.fit(bundle, bundle.rows("train"),
+                                device=config.training.device if encode_text and config.model.vital_encoder != "xgboost" else "cpu")
     output = Path(config.training.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     if not encode_text:
         report.update(bundle.validate_all())
-    report["active_labs"] = sum(preprocessor.active_lab_features)
+    report["active_labs"] = sum(getattr(preprocessor, "active_lab_features", []))
+    report["vital_only"] = config.model.vital_only
     write_json(output / "data_report.json", report)
     write_json(output / "preprocessing_preview.json", preprocessor.to_dict())
-    if not encode_text:
+    if not encode_text or config.model.vital_only:
         return bundle, preprocessor, None, None
     backend = make_backend(config.text)
     cache = TextCache(config.text.cache_dir, backend)

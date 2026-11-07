@@ -21,7 +21,8 @@ class TextCache:
         self.hit_memory = self.miss_memory = None
 
     def key(self, text):
-        return fingerprint({"text": clean_text(text), "encoder": self.backend.identity})
+        identity = getattr(self.backend, "cache_identity", self.backend.identity)
+        return fingerprint({"text": clean_text(text), "encoder": identity})
 
     def get(self, text):
         start = time.perf_counter()

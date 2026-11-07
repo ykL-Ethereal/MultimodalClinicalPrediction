@@ -14,6 +14,10 @@ class PlattCalibrator:
     slope: float
     intercept: float
 
+    def __post_init__(self):
+        if not np.isfinite([self.slope, self.intercept]).all():
+            raise ValueError("Calibration parameters must be finite")
+
     @classmethod
     def fit(cls, logits, labels):
         x, y = np.asarray(logits, dtype=float), np.asarray(labels)
@@ -25,7 +29,9 @@ class PlattCalibrator:
         return cls(float(model.coef_[0, 0]), float(model.intercept_[0]))
 
     def predict(self, logits):
-        return sigmoid(self.slope * np.asarray(logits) + self.intercept)
+        # Match threshold selection and inference, including the affine transform:
+        # multiplying float32 arrays before sigmoid's cast can move a boundary.
+        return sigmoid(self.slope * np.asarray(logits, dtype=np.float64) + self.intercept)
 
     def to_dict(self):
         return asdict(self)

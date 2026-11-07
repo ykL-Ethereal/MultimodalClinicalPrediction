@@ -1,4 +1,4 @@
-"""Unidirectional encoders using PyTorch LSTM/GRU and packed sequences.
+"""Unidirectional encoders using dense PyTorch LSTM/GRU (cuDNN on CUDA).
 
 https://docs.pytorch.org/docs/stable/generated/torch.nn.LSTM.html
 https://docs.pytorch.org/docs/stable/generated/torch.nn.GRU.html
@@ -6,7 +6,6 @@ Time masks denote right padding, not feature-level missing observations.
 """
 import torch
 from torch import nn
-from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 
 def validate_sequence(x, time_mask, max_time_steps):
@@ -41,11 +40,9 @@ class VitalRNN(nn.Module):
     def sequence(self, x, time_mask):
         validate_sequence(x, time_mask, self.max_time_steps)
         clean = x.masked_fill(~time_mask[..., None], 0)
-        # A dummy zero step makes empty rows packable; their outputs are masked.
-        packed = pack_padded_sequence(clean, time_mask.sum(dim=1).clamp(min=1).cpu(),
-                                      batch_first=True, enforce_sorted=False)
-        encoded, _ = self.rnn(packed)
-        z, _ = pad_packed_sequence(encoded, batch_first=True, total_length=x.shape[1])
+        # Right padding cannot affect earlier states of a unidirectional RNN.
+        # Dense execution avoids GPU -> CPU length copies and uses cuDNN fast paths.
+        z, _ = self.rnn(clean)
         return z.masked_fill(~time_mask[..., None], 0)
 
     def forward(self, x, time_mask, available):

@@ -82,12 +82,13 @@ def tiny_text_model(directory):
 def small_config(directory):
     return Config(data=DataConfig(root=str(Path(directory) / 'data'), horizon=6),
                   text=TextConfig(model_name=tiny_text_model(directory), local_files_only=True,
-                                  max_tokens=32, cache_dir=str(Path(directory) / 'cache')),
+                                  max_tokens=32, cache_dir=str(Path(directory) / 'cache'), device='cpu'),
                   model=ModelConfig(embedding_dim=16, static_dim=8, tcn_channels=8, tcn_blocks=5,
                                     max_time_steps=120, lab_hidden=16, rnn_hidden=8,
                                     dropout=0, modality_dropout=0),
                   training=TrainingConfig(epochs=1, batch_size=2, patience=1, num_threads=1,
-                                          output_dir=str(Path(directory) / 'run'))).validate()
+                                          threshold_strategy='fixed', threshold=0.5,
+                                          output_dir=str(Path(directory) / 'run'), device='cpu')).validate()
 
 
 def cache(directory):

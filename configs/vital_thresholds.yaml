@@ -1,0 +1,23 @@
+# Reproducible research configuration. Paths are relative to this file.
+data:
+  root: ../data/Mutimodel_data/固定训练数据
+  horizon: 6  # Run 1, 2, 3, 6 separately; each artifact owns its own threshold.
+model:
+  vital_only: true
+  vital_encoder: tcn
+  max_time_steps: 120
+training:
+  models: [xgboost, lstm, tcn, gru, grud]
+  seed: 42
+  calibration: true  # Platt on held-out calibration patients only.
+  threshold_strategy: recall_constraint  # Alternatives: max_f1, fixed.
+  target_recall: 0.80  # Configurable WINDOW research target; not a clinical standard.
+  threshold: null  # fixed requires an explicit number, e.g. 0.5.
+  threshold_fraction: 0.30  # Fraction of validation patients reserved for decisions.
+  calibration_fraction: 0.50  # Of remaining validation patients; ~35% of original.
+  epochs: 50
+  patience: 8
+  device: auto
+  precision: auto
+  deterministic: true
+  output_dir: ../runs/threshold_research

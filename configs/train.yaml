@@ -4,13 +4,16 @@ data:
   horizon: 6  # Fixed cohort supports 1, 2, 3, 6; one task per run.
 text:
   backend: macbert
-  model_name: hfl/chinese-macbert-base
+  model_name: ../models/chinese-macbert-base
+  local_files_only: true
   revision: main  # Resolved immutable weight revision + tokenizer hash saved in artifact.
   max_tokens: 512
   batch_size: 16
   cache_dir: ../runs/macbert_cache
-  device: cuda:0  # PyTorch 2.6.0 + CUDA 12.4
+  device: auto  # Prefer CUDA; explicit cuda:0 fails early if CUDA is unavailable.
+  precision: auto  # CUDA BF16 when supported, otherwise FP16; CPU uses FP32.
 model:
+  vital_only: false  # --vital_only selects the 20-channel vital-only model and skips labs, notes, static inputs.
   vital_encoder: tcn  # Set per experiment from training.models.
   rnn_hidden: 64
   rnn_layers: 2  # LSTM/GRU only; GRU-D uses one decay cell layer.
@@ -24,8 +27,23 @@ model:
   lab_hidden: 256
   dropout: 0.1
   modality_dropout: 0.1
+news2:
+  rules_file: news2_rules.yaml  # All clinical scoring bands and the alarm threshold.
+  batch_size: 256
+xgboost:
+  num_boost_round: 500
+  early_stopping_rounds: 30
+  max_depth: 6
+  learning_rate: 0.05
+  min_child_weight: 1.0
+  subsample: 0.8
+  colsample_bytree: 0.8
+  reg_lambda: 1.0
+  max_bin: 256
+  batch_size: 16384  # Disk feature batches; CPU hist external-memory training.
+  nthread: 4
 training:
-  models: [tcn, lstm, gru, grud]  # Add grud to run the missingness-aware variant.
+  models: [tcn, lstm, gru, grud, news2]  # NEWS2 is evaluated directly without training.
   seed: 42
   batch_size: 16
   epochs: 50
@@ -36,6 +54,8 @@ training:
   class_weight: false
   calibration: false
   threshold: null
-  device: cuda:0  # PyTorch 2.6.0 + CUDA 12.4
+  device: auto
+  precision: auto
+  deterministic: true  # false enables cuDNN autotuning; true requests deterministic experiments.
   output_dir: ../runs  # Each run creates <model>/<timestamp>/ here.
 

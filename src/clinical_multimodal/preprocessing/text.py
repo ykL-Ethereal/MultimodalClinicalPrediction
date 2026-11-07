@@ -48,9 +48,11 @@ class MacBertBackend:
         import transformers
         from transformers import AutoConfig, AutoModel, AutoTokenizer
         from huggingface_hub import hf_hub_download
+        from ..accelerator import resolve_device, resolve_precision
         self.torch = torch
         self.config = config
-        self.device = torch.device(config.device)
+        self.device = resolve_device(config.device)
+        self.precision = resolve_precision(self.device, config.precision)
         source = str(snapshot or config.model_name)
         local = Path(source).is_dir()
         revision = None if local else config.revision
@@ -116,11 +118,12 @@ class MacBertBackend:
                              "chunk": CHUNK_VERSION, "pool": POOL_VERSION}
 
     def encode(self, text):
+        from ..accelerator import autocast_context
         torch = self.torch
         chunks = chunk_token_ids(text, self.tokenizer, self.max_tokens)
         vectors = []
         self.model.eval()
-        with torch.no_grad():
+        with torch.inference_mode():
             for start in range(0, len(chunks), self.config.batch_size):
                 encoded = []
                 for ids in chunks[start:start + self.config.batch_size]:
@@ -133,15 +136,26 @@ class MacBertBackend:
                     item["special_tokens_mask"] = [int(token != -1) for token in layout]
                     encoded.append(item)
                 batch = self.tokenizer.pad(encoded, padding=True, return_tensors="pt")
-                special = batch.pop("special_tokens_mask").bool().to(self.device)
-                batch = {k: v.to(self.device) for k, v in batch.items()}
+                if self.device.type == "cuda":
+                    batch = {k: v.pin_memory().to(self.device, non_blocking=True) for k, v in batch.items()}
+                else:
+                    batch = {k: v.to(self.device) for k, v in batch.items()}
+                special = batch.pop("special_tokens_mask").bool()
                 body = batch["attention_mask"].bool() & ~special
                 if not body.any(dim=1).all():
                     raise ValueError("A text chunk contains no body tokens")
-                hidden = self.model(**batch).last_hidden_state
+                with autocast_context(self.device, self.precision):
+                    hidden = self.model(**batch).last_hidden_state
+                # Accumulate token means in FP32 even when the backbone uses AMP.
+                hidden = hidden.float()
                 mean = hidden.masked_fill(~body[..., None], 0).sum(dim=1) / body.sum(dim=1, keepdim=True)
                 vectors.append(mean.float().cpu().numpy())
         return np.concatenate(vectors)
+
+    @property
+    def cache_identity(self):
+        # CUDA/CPU and AMP may produce different vectors for identical weights.
+        return {**self.identity, "execution_device": self.device.type, "precision": self.precision}
 
     def export(self, path):
         path = Path(path)
