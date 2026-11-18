@@ -1,4 +1,4 @@
-# Reproducible research configuration. Paths are relative to this file.
+# RTX 5060 Ti throughput configuration. Paths are relative to this file.
 data:
   root: ../data/Mutimodel_data/固定训练数据
   horizon: 6  # Run 1, 2, 3, 6 separately; each artifact owns its own threshold.
@@ -7,11 +7,12 @@ model:
   vital_encoder: tcn
   max_time_steps: 120
 training:
-  models: [xgboost, lstm, tcn, gru, grud]
+  models: [news2]  # xgboost, lstm, tcn, gru, grud
   seed: 42
+  batch_size: 256
+  eval_batch_size: 512
   calibration: true  # Platt on held-out calibration patients only.
-  threshold_strategy: recall_constraint  # Alternatives: max_f1, fixed.
-  target_recall: 0.80  # Configurable WINDOW research target; not a clinical standard.
+  threshold_strategy: max_f1  # Maximize validation F1 without a recall constraint.
   threshold: null  # fixed requires an explicit number, e.g. 0.5.
   threshold_fraction: 0.30  # Fraction of validation patients reserved for decisions.
   calibration_fraction: 0.50  # Of remaining validation patients; ~35% of original.
@@ -19,5 +20,6 @@ training:
   patience: 8
   device: auto
   precision: auto
-  deterministic: true
+  deterministic: false  # Enable cuDNN autotuning; true for deterministic experiments.
+  allow_tf32: true
   output_dir: ../runs/threshold_research

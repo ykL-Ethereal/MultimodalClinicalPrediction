@@ -36,7 +36,8 @@ def main(argv=None):
             raise FileExistsError("Choose a new evaluation output path")
         from .pipelines.evaluate import evaluate_pipeline
         print(evaluate_pipeline(args.artifact, config.data.root, args.evaluation_output,
-                                device=args.device or "auto", batch_size=config.training.batch_size))
+                                device=args.device or "auto",
+                                batch_size=config.training.eval_batch_size or config.training.batch_size))
         return
     if args.evaluation_output:
         parser.error("--evaluation-output requires --artifact")

@@ -3,11 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import random
+import time
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from ..accelerator import autocast_context, resolve_device, resolve_precision
+from ..accelerator import autocast_context, configure_tf32, resolve_device, resolve_precision
 from ..data.collate import collate_samples, move_batch
 from ..evaluation.calibration import sigmoid
 from ..evaluation.metrics import binary_metrics
@@ -75,6 +76,7 @@ class Trainer:
         self.config = config
         self.device = resolve_device(config.device)
         self.precision = resolve_precision(self.device, config.precision)
+        configure_tf32(config.allow_tf32 and self.device.type == "cuda")
         self.model = model.to(self.device)
         self.output_dir = output_dir
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=config.learning_rate,
@@ -118,9 +120,11 @@ class Trainer:
         metric = "auprc" if both_validation else "negative_log_loss" if val_mask.any() else "last_epoch_no_validation"
         train_loader = make_loader(train_dataset, self.config.batch_size, shuffle=True,
                                    seed=self.config.seed, device=self.device)
-        val_loader = make_loader(validation_dataset, self.config.batch_size, device=self.device)
+        val_loader = make_loader(validation_dataset, self.config.eval_batch_size or self.config.batch_size,
+                                 device=self.device)
         best, best_epoch, stale, history = -float("inf"), -1, 0, []
         for epoch in range(self.config.epochs):
+            epoch_started = time.perf_counter()
             total, count, skipped = 0., 0, 0
             for step_index, batch in enumerate(train_loader, 1):
                 step = self.train_batch(batch, pos_weight)
@@ -132,15 +136,20 @@ class Trainer:
                 count += n
                 if step_index % self.config.log_every_steps == 0:
                     print(f"epoch={epoch + 1} batch={step_index}/{len(train_loader)} "
-                          f"samples={count} train_loss={total/count:.6f}", flush=True)
+                          f"samples={count} train_loss={total/count:.6f} "
+                          f"samples_per_second={count/(time.perf_counter()-epoch_started):.1f}", flush=True)
             if count == 0:
                 raise ValueError("No optimizer updates in this epoch")
+            train_seconds = time.perf_counter() - epoch_started
+            validation_started = time.perf_counter()
             predictions = collect_predictions(self.model, val_loader, self.device, precision=self.precision)
             eligible = predictions["label_mask"] & predictions["valid"]
             metrics = binary_metrics(predictions["targets"][eligible], sigmoid(predictions["logits"][eligible]))
             score = metrics["auprc"] if both_validation else -metrics["log_loss"] if metrics["log_loss"] is not None else float(epoch)
             record = {"epoch": epoch + 1, "train_loss": total / count, "trained_samples": count,
-                      "skipped_batches": skipped, "validation": metrics, "selection_score": score}
+                      "skipped_batches": skipped, "validation": metrics, "selection_score": score,
+                      "train_seconds": train_seconds, "train_samples_per_second": count / train_seconds,
+                      "validation_seconds": time.perf_counter() - validation_started}
             history.append(record)
             if score > best:
                 best, best_epoch, stale = score, epoch + 1, 0

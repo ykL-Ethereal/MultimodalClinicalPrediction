@@ -49,7 +49,7 @@ python main.py --config configs/train.yaml
 
 | 配置 | 输入与模型 | 校准和阈值 | 默认运行根目录 |
 |---|---|---|---|
-| `configs/train.yaml` | 多模态 TCN/LSTM/GRU/GRU-D，加 NEWS2 基线 | 神经网络不校准，按默认 recall_constraint 在独立验证患者上选择 raw 概率阈值；NEWS2 使用规则阈值 | `runs/` |
+| `configs/train.yaml` | 多模态 TCN/LSTM/GRU/GRU-D，加 NEWS2 基线 | 神经网络不校准，按默认 max_f1 在独立验证患者上选择 raw 概率阈值；NEWS2 使用规则阈值 | `runs/` |
 | `configs/vital_thresholds.yaml` | 仅体征 XGBoost/LSTM/TCN/GRU/GRU-D | Platt 校准，独立验证患者选择 calibrated 概率阈值，目标窗口 recall 为 0.80 | `runs/threshold_research/` |
 
 常用训练参数如下；未提供的参数使用所选 YAML 及代码默认值：
@@ -119,7 +119,7 @@ foreach ($h in 1, 2, 3, 6) {
 }
 ```
 
-阈值策略在 YAML 的 `training` 中设置：默认 `threshold_strategy: recall_constraint`，在窗口 recall ≥ `target_recall: 0.80` 的候选中选 precision 最大者；`max_f1` 选择最大 F1；`fixed` 必须同时设置数值 `threshold`，例如 0.5。自动策略需保留 `threshold: null`。目标 recall 约束作用于阈值选择集，不保证测试集达到相同召回率。
+阈值策略在 YAML 的 `training` 中设置：默认 `threshold_strategy: max_f1`，选择最大 F1，不设置 recall 下限；可选 `recall_constraint` 在窗口 recall ≥ `target_recall: 0.80` 的候选中选 precision 最大者；`fixed` 必须同时设置数值 `threshold`，例如 0.5。自动策略需保留 `threshold: null`。仅 `recall_constraint` 使用目标 recall 约束，约束作用于阈值选择集，不保证测试集达到相同召回率。
 
 训练使用原训练患者；验证患者进一步分为早停、校准、阈值选择三种角色。阈值固定后才评价测试集。`validation_report.json` 来自早停验证集，`threshold_selection_*` 是阈值优化集统计，`test_report.json` 用于最终测试评价。患者分区、策略细节和事件级指标限制见 [预测阈值说明](docs/thresholds.md)。
 
@@ -133,7 +133,11 @@ conda run -n MCP python main.py
 
 `text.device` 和 `training.device` 均为 `auto`，无 CUDA 时回退 CPU；指定 `cuda:0` 可要求必须使用指定显卡。训练、验证、推理及 MacBERT 均使用所选设备。CUDA 路径还在显卡上完成训练集统计拟合、批次标准化、缺失值掩码、时间特征和模态质量计算；通过锁页内存及非阻塞传输减少数据搬运等待，使用融合 AdamW 和 `inference_mode`。
 
-配置中的 `precision: auto` 在支持时使用 BF16，否则使用 FP16，并为 FP16 训练启用梯度缩放。设为 `float32` 可关闭混合精度。文本向量缓存包含实际设备类型和精度，切换精度或 CPU/GPU 后会生成独立缓存。`training.deterministic: false` 启用 cuDNN 自动调优；需要确定性实验时改为 `true`。
+配置中的 `precision: auto` 在支持时使用 BF16，否则使用 FP16，并为 FP16 训练启用梯度缩放。设为 `float32` 可关闭混合精度。文本向量缓存包含实际设备类型、精度及启用的 TF32 设置，切换后会生成独立缓存。`training.deterministic: false` 启用 cuDNN 自动调优；需要确定性实验时改为 `true`。
+
+RTX 5060 Ti 8GB 的吞吐配置已写入两个 YAML：`configs/train.yaml` 使用训练批量 128、验证批量 256；体征配置使用 256/512。`training.eval_batch_size: 0` 表示沿用训练批量。两份配置均使用 `deterministic: false`、`allow_tf32: true`，后者加速 FP32 CUDA 矩阵乘法和卷积；关闭 AMP 且需要完整 FP32 精度时同时设置 `allow_tf32: false`。大批量改变每轮更新次数，非确定性算法与 TF32 也可能改变数值结果，需重新评价 AUPRC。学习率与早停指标保持原设置。
+
+训练样本跳过元数据字典构造，导出阶段按批读取元数据并保持原顺序；体征标准化常量按设备缓存。日志与 `history.json` 新增每轮训练耗时、样本吞吐及验证耗时。Windows 数据加载继续使用单进程，避免复制完整患者索引、分片缓存和 GPU 文本模型。微型 GPU 测速方法与结果见 [RTX 5060 Ti 性能记录](docs/performance_5060.md)。
 
 磁盘解压、文本分词、JSON 报告和 scikit-learn 评价/校准保留在 CPU。NEWS2 保持独立的 NumPy 规则基线，无需加载 PyTorch 或文本模型。上述加速不改变患者划分、标签或训练专属标准化规则。
 
@@ -244,6 +248,7 @@ python extract_results.py --help
 
 默认输出 `runs/results/training_results.csv`（UTF-8 BOM，可用 Excel 打开）和
 `training_results.json`（保留完整验证/测试报告、校准曲线及已保存的阈值策略），终端同时显示主要指标和测试阈值、Precision、Recall、F1。
+完整列名、计算口径、空值含义和正例定义见 [训练结果 CSV 字段字典](docs/自动threshold的字段释义.md)。
 每次运行一行，包含状态、模型、模式、预测时距、种子、设备、最佳轮次、实际训练轮数、
 耗时、验证/测试集样本数与阳性率、AUPRC、AUROC、Brier、log loss、阈值指标及制品路径。
 新增字段包括 `validation_` / `test_` 前缀的 precision、recall、f1、confusion_matrix 及其顺序，
@@ -312,7 +317,7 @@ results = predictor.predict('data/Mutimodel_data/固定训练数据', rows=[0, 1
 | 导入依赖失败或找不到 PyTorch | 确认已激活安装依赖的环境，可用 `python -c "import sys; print(sys.executable)"` 核对解释器 |
 | 找不到固定数据包 | 检查 YAML 的 `data.root` 和 `dataset_schema.json`；YAML 相对路径按配置文件所在目录解析 |
 | 本地 MacBERT 加载失败 | 检查 `models/chinese-macbert-base/` 文件或调整 `text.model_name`；仅体征流程不需要文本模型 |
-| GPU 显存不足 | 减小 YAML 的 `training.batch_size`；多模态文本编码还可减小 `text.batch_size` |
+| GPU 显存不足 | 减小 YAML 的 `training.batch_size` 和 `training.eval_batch_size`；多模态文本编码还可减小 `text.batch_size` |
 | 自动阈值或校准提示缺少类别/患者 | 检查当前时距的独立验证分区和有效样本；不要将测试患者加入拟合，详见阈值文档 |
 | 提取提示没有匹配运行 | 核对 `--runs-dir`，并检查模型、单模态筛选条件；脚本读取保存的运行目录，不解析训练日志文本 |
 | 提取结果含空值或 NOTE | 查看 `status`、`error`、`extraction_issues` 及原报告；可能是旧报告、尚未完成或缺少产物 |

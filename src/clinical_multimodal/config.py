@@ -54,6 +54,7 @@ class TrainingConfig:
     seed: int = 20261010
     batch_size: int = 16
     epochs: int = 50
+    eval_batch_size: int = 0  # 0 reuses batch_size; evaluation does not retain gradients.
     patience: int = 8
     learning_rate: float = 3e-4
     weight_decay: float = 1e-4
@@ -62,12 +63,13 @@ class TrainingConfig:
     calibration: bool = False
     calibration_fraction: float = 0.5
     threshold: float | None = None
-    threshold_strategy: str = "recall_constraint"
+    threshold_strategy: str = "max_f1"
     target_recall: float = 0.80
     threshold_fraction: float = 0.30
     device: str = "auto"
     precision: str = "float32"
     deterministic: bool = True
+    allow_tf32: bool = False
     num_threads: int = 4
     log_every_steps: int = 100
     output_dir: str = "../runs"
@@ -148,6 +150,8 @@ class Config:
             raise ValueError("Dropout probabilities must lie in [0, 1)")
         if self.training.learning_rate <= 0 or self.training.weight_decay < 0 or self.training.gradient_clip <= 0:
             raise ValueError("Invalid optimizer parameters")
+        if self.training.eval_batch_size < 0:
+            raise ValueError("eval_batch_size must be nonnegative (0 reuses batch_size)")
         if not 0 < self.training.calibration_fraction < 1:
             raise ValueError("calibration_fraction must lie in (0, 1)")
         from .evaluation.thresholds import STRATEGIES, validate_threshold

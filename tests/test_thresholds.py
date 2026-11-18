@@ -167,10 +167,13 @@ def test_calibrated_training_saved_decision_and_evaluation(encoder):
 
 
 def test_research_configuration_and_horizons():
-    cfg = load_config(Path(__file__).resolve().parents[1] / "configs/vital_thresholds.yaml")
+    # Exercise the five-model override independently of the user's selected default models.
+    cfg = load_config(Path(__file__).resolve().parents[1] / "configs/vital_thresholds.yaml",
+                      models=["tcn", "lstm", "gru", "grud", "xgboost"])
     assert cfg.model.vital_only and cfg.training.calibration
     assert set(cfg.training.models) == {"tcn", "lstm", "gru", "grud", "xgboost"}
     assert cfg.training.target_recall == .8
+    assert cfg.training.threshold_strategy == "max_f1"
     for horizon in (1, 2, 3, 6):
         cfg.data.horizon = horizon
         cfg.validate()
