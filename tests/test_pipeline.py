@@ -166,7 +166,7 @@ class PipelineTests(unittest.TestCase):
     def test_default_config_resolves_packaged_data(self):
         root = Path(__file__).resolve().parents[1]
         cfg = load_config(root / 'configs/train.yaml')
-        self.assertEqual(Path(cfg.data.root), root / 'data/Mutimodel_data/固定训练数据')
+        self.assertEqual(Path(cfg.data.root), root / 'data/Mutimodel_data/固定训练数据_30min')
         self.assertTrue((Path(cfg.data.root) / 'dataset_schema.json').is_file())
         self.assertEqual(cfg.training.models, ['tcn', 'lstm', 'gru', 'grud', 'news2'])
         for raw in ({'data': {'horizon':24}}, {'text': {'backend':'demo'}}, {'data': {'mode':'raw_records'}},

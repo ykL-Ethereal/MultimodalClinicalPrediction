@@ -14,6 +14,9 @@ def validation_partition(bundle, config):
     if metadata[["patient_id", "split"]].isna().any().any() or (
             metadata.groupby("patient_id").split.nunique() > 1).any():
         raise ValueError("Patient leakage/missing identity across dataset splits")
+    if config.training.protocol == "patient_cv":
+        config.validate()
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64), rows
     auto = config.training.threshold_strategy != "fixed"
     patients = np.array(sorted(metadata.iloc[rows].patient_id.unique()))
     roles = 1 + int(config.training.calibration) + int(auto)
@@ -56,9 +59,10 @@ def validation_partition(bundle, config):
 
 def partition_record(bundle, config, partitions):
     record = {"seed": config.training.seed, "horizon_hours": config.data.horizon,
-              "method": "validation_patient_stratification_by_any_positive_window",
-              "threshold_fraction": config.training.threshold_fraction,
-              "calibration_fraction_of_remaining": config.training.calibration_fraction,
+              "method": ("full_validation_after_train_patient_cv" if config.training.protocol == "patient_cv"
+                         else "validation_patient_stratification_by_any_positive_window"),
+              "threshold_fraction": 1.0 if config.training.protocol == "patient_cv" else config.training.threshold_fraction,
+              "calibration_fraction_of_remaining": 0.0 if config.training.protocol == "patient_cv" else config.training.calibration_fraction,
               "dataset_patient_splits_sha256": file_sha256(bundle.root / "patient_splits.csv"),
               "partitions": {}}
     for name, rows in zip(("selection_validation", "calibration", "threshold_validation"), partitions):
@@ -94,7 +98,8 @@ def fit_threshold(bundle, config, rows, collected, calibrator, partitions):
                           "eligible_sample_ids_sha256": fingerprint(bundle.metadata.iloc[rows[valid]].sample_id.tolist()),
                           "total_windows": len(rows), "excluded_windows": int((~valid).sum())},
                   research_target_notice="Window recall target is configurable, not a validated clinical standard",
-                  alarm_rule={"unit": "window", "merge": "none", "cooldown_minutes": 0})
+                  alarm_rule={"unit": "window", "merge": "none", "cooldown_minutes": 0,
+                              "prediction_interval_minutes": bundle.schema.get("sampling_interval_minutes")})
     return policy
 
 
@@ -124,6 +129,19 @@ def audit_threshold_splits(config):
     bundle = FixedCohortBundle(config.data.root, vital_only=config.model.vital_only)
     parts = validation_partition(bundle, config)
     record = partition_record(bundle, config, parts)
+    if config.training.protocol == "patient_cv":
+        from .patient_cv import patient_folds, fold_record
+        folds = patient_folds(bundle, config.data.horizon, config.training.cv_folds, config.training.seed)
+        record["train_cv_partitions"] = fold_record(bundle, folds)
+        record["train_cv_counts"] = []
+        for train, val in folds:
+            item = {}
+            for role, rows in (("train", train), ("selection", val)):
+                y, mask = bundle.labels(rows, config.data.horizon)
+                item[role] = {"windows": len(rows), "patients": int(bundle.metadata.iloc[rows].patient_id.nunique()),
+                              "positive_windows": int((y[mask] == 1).sum()),
+                              "positive_patients": int(bundle.metadata.iloc[rows[mask & (y == 1)]].patient_id.nunique())}
+            record["train_cv_counts"].append(item)
     record["counts"] = {}
     for name, rows in [("train", bundle.rows("train")), *zip(
             ("selection_validation", "calibration", "threshold_validation"), parts), ("test", bundle.rows("test"))]:

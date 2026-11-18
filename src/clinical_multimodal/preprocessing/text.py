@@ -155,13 +155,7 @@ class MacBertBackend:
     @property
     def cache_identity(self):
         # CUDA/CPU and AMP may produce different vectors for identical weights.
-        identity = {**self.identity, "execution_device": self.device.type, "precision": self.precision}
-        if self.device.type == "cuda":
-            matmul = self.torch.backends.cuda.matmul
-            tf32 = matmul.fp32_precision == "tf32" if hasattr(matmul, "fp32_precision") else matmul.allow_tf32
-            if tf32:
-                identity["matmul_tf32"] = True
-        return identity
+        return {**self.identity, "execution_device": self.device.type, "precision": self.precision}
 
     def export(self, path):
         path = Path(path)

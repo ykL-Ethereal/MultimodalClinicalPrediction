@@ -5,13 +5,11 @@ from torch.utils.data import Dataset, Sampler
 
 
 class FixedPreparedDataset(Dataset):
-    def __init__(self, bundle, rows, preprocessor, cache, horizon, *, with_targets=True, defer_numeric=False,
-                 include_metadata=True):
+    def __init__(self, bundle, rows, preprocessor, cache, horizon, *, with_targets=True, defer_numeric=False):
         self.bundle, self.rows, self.preprocessor, self.cache = bundle, np.asarray(rows, dtype=int), preprocessor, cache
         self.vital_only = getattr(preprocessor, "vital_only", False)
         self.text_dimension = 0 if self.vital_only else cache.backend.dimension
         self.defer_numeric = defer_numeric
-        self.include_metadata = include_metadata
         from .schema import Contract
         from .fixed_adapter import vital_contract
         Contract(**preprocessor.contract).assert_matches(vital_contract(bundle.schema) if self.vital_only else bundle.contract)
@@ -44,15 +42,13 @@ class FixedPreparedDataset(Dataset):
 
     def __getitems__(self, indices):
         rows = self.rows[indices]
-        # Training consumes only tensors. Exports need metadata in the exact requested order.
-        metadata = self.bundle.metadata.iloc[rows].to_dict("records") if self.include_metadata else [{} for _ in rows]
         if self.vital_only:
             a = self.bundle.get_numeric(rows)
             numeric = ({k: a[k] for k in ("vital_features", "vital_observed_mask")} if self.defer_numeric
                        else self.preprocessor.transform_arrays(self.bundle, a))
             samples = [{"inputs": {k: v[i] for k, v in numeric.items()}, "target": float(self.y[index]),
                         "label_mask": bool(self.label_mask[index]),
-                        "metadata": metadata[i]}
+                        "metadata": self.bundle.metadata.iloc[rows[i]].to_dict()}
                        for i, index in enumerate(indices)]
             if self.defer_numeric:
                 for sample in samples:
@@ -82,7 +78,7 @@ class FixedPreparedDataset(Dataset):
                     self.encoded.popitem(last=False)
             samples.append({"inputs": {k:v[i] for k,v in numeric.items()}, "documents": documents,
                 "text_dimension": self.text_dimension, "target": float(self.y[index]),
-                "label_mask": bool(self.label_mask[index]), "metadata": metadata[i]})
+                "label_mask": bool(self.label_mask[index]), "metadata": self.bundle.metadata.iloc[rows[i]].to_dict()})
             if self.defer_numeric:
                 samples[-1]["numeric_preprocessor"] = self.preprocessor
         return samples

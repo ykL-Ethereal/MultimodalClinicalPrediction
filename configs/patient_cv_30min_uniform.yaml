@@ -1,0 +1,41 @@
+# Neural-only research protocol. XGBoost keeps its existing configuration/pipeline.
+data:
+  root: ../data/Mutimodel_data/固定训练数据_30min
+  horizon: 6
+  horizons: [6, 3, 2, 1]  # --horizon overrides this schedule with a single task.
+model:
+  vital_only: true
+  vital_encoder: gru
+  rnn_dropout: 0.0  # Same recurrent setting as the balanced arm; projection dropout stays 0.1.
+training:
+  models: [gru, tcn, lstm, grud]
+  protocol: patient_cv
+  cv_folds: 3
+  seed: 42
+  calibration: false
+  selection_metric: fpr_at_recall
+  threshold_strategy: min_fp_recall
+  target_recall: 0.80
+  threshold: null
+  sampling: uniform_budget
+  positive_fraction: 0.0625
+  positive_fraction_by_horizon:
+    1: 0.03125  # Matches the balanced arm's recorded settings; uniform sampling ignores this quota.
+  steps_per_epoch: 32  # 32768 sampled windows/epoch; same budget in the uniform control.
+  max_positive_repeats: 16
+  class_weight: false
+  batch_size: 1024  # Hardware benchmark; lock this for both sampling arms.
+  epochs: 50
+  patience: 8
+  learning_rate: 0.0003
+  device: auto
+  precision: auto
+  deterministic: true
+  num_threads: 4
+  use_numeric_cache: true
+  numeric_cache_dir: ../runs/vital_numeric_cache
+  loader_workers: 2
+  prefetch_factor: 2
+  bootstrap_replicates: 1000
+  output_dir: ../runs/patient_cv_30min
+

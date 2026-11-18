@@ -1,5 +1,7 @@
 # 可复现的窗口级预测阈值
 
+> 本文记录原 holdout/Platt 阈值流程。当前默认入口已经改为 30 分钟数据上的 Train 患者三折交叉验证，完整 Validation 选阈值；新流程见 [30 分钟患者交叉验证说明](patient_cv_30min.md)。本文的历史样本数和实验结果属于原 10 分钟包。原流程仍可通过显式配置运行，XGBoost 保留该流程；当前配置的数据路径已改为 30 分钟包。
+
 ## 实际代码审计
 
 检查对象是修改前的工作区实际代码，而非仅依据背景描述。
@@ -30,7 +32,7 @@
 配置 `training.threshold_strategy`：
 
 - `recall_constraint`：在窗口 recall ≥ `target_recall` 的候选中选 precision 最大者，并列取更高阈值。默认 0.80 只是可配置研究目标，不是已验证临床标准。
-- `max_f1`（默认）：F1 最大，不设置 recall 下限，并列同样取更高阈值。
+- `max_f1`：F1 最大，并列同样取更高阈值。
 - `fixed`：必须显式填写 `training.threshold`；不优化。为防配置歧义，自动策略的 threshold 必须为 null。
 
 在不同预测概率的精确边界上扫描，排序复杂度 O(n log n)，不会用粗网格漏掉边界或拆开相同概率的样本。候选按降序扫描，目标值相同选择第一个；全程规则为 `p >= threshold`。阈值允许 [0,1] 端点，处理恰好为 0 或 1 的概率。没有预测阳性时 precision 定义为 0；无正标签时 recall 不可定义，自动优化拒绝该输入。
@@ -77,7 +79,7 @@ python -B -m pytest -q -p no:cacheprovider
 
 若默认 python 不在项目环境，请使用 `D:/development/software/anaconda3/envs/MCP/python.exe` 替代。配置默认写入全新 `runs/threshold_research/`，每次仍自动创建时间戳目录，已有制品不覆盖。评估命令拒绝已存在输出路径。
 
-当前默认 `threshold_strategy: max_f1`；如需召回率约束对照，将研究 YAML 另存后设 `threshold_strategy: recall_constraint`、`target_recall: 0.80`；手动策略设 `threshold_strategy: fixed`、`threshold: 0.5`。这些策略不改变测试隔离规则。自动选择有意与训练绑在同一次运行内，避免对已经训练、早停使用了全部验证患者的旧模型事后声称拥有独立阈值验证集。
+如需 F1 对照，将研究 YAML 另存后设 `threshold_strategy: max_f1`；手动策略设 `threshold_strategy: fixed`、`threshold: 0.5`。两者不改变测试隔离规则。自动选择有意与训练绑在同一次运行内，避免对已经训练、早停使用了全部验证患者的旧模型事后声称拥有独立阈值验证集。
 
 ## 局限
 

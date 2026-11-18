@@ -74,14 +74,9 @@ class VitalNumericPreprocessor:
         v = a["vital_features"].clone()
         observed = a["vital_observed_mask"].clone()
         present = torch.cat([(v[:, :, :4] != 0) | observed[:, :, :4], v[:, :, [10, 13]] > 0], dim=2)
-        cache = getattr(self, "_device_parameters", {})
-        if v.device not in cache:
-            cache[v.device] = (
-                torch.tensor(self.vital_mean, dtype=torch.float64, device=v.device),
-                torch.tensor(self.vital_std, dtype=torch.float64, device=v.device),
-                torch.tensor(self.fit_provenance["vital_observed_counts"], device=v.device) >= 2)
-            self._device_parameters = cache
-        mean, std, supported = cache[v.device]
+        mean = torch.as_tensor(self.vital_mean, dtype=torch.float64, device=v.device)
+        std = torch.as_tensor(self.vital_std, dtype=torch.float64, device=v.device)
+        supported = torch.as_tensor(self.fit_provenance["vital_observed_counts"], device=v.device) >= 2
         observed &= present & supported
         standardized = (v[:, :, VALUE_CHANNELS].double() - mean) / std
         v[:, :, VALUE_CHANNELS] = standardized.masked_fill(~(present & supported), 0).float()

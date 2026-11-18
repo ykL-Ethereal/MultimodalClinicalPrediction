@@ -1,5 +1,7 @@
 # 固定包装数据契约
 
+当前默认包为 `data/Mutimodel_data/固定训练数据_30min`，从保留的原 10 分钟包按住院内时间间隔重采样。张量历史长度仍是 120 分钟。新包的 sample_id、split ID、shard start/rows 已同步重建，source_sample_id 保存原行号；详见 [30 分钟实验](patient_cv_30min.md)。
+
 唯一格式：`data/Mutimodel_data/固定训练数据` 中的 `dataset_schema.json`、全局样本索引、患者划分、检验目录、文本及偏移索引、划分 ID 和分片 NPZ。
 
 - 标签窗口为 1、2、3、6 小时；生命体征历史为 120 分钟。

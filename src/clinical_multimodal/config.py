@@ -9,8 +9,9 @@ import math
 
 @dataclass
 class DataConfig:
-    root: str = "../data/Mutimodel_data/固定训练数据"
+    root: str = "../data/Mutimodel_data/固定训练数据_30min"
     horizon: int = 6
+    horizons: list[int] = field(default_factory=list)  # CLI schedule; each run keeps a scalar horizon.
 
 
 @dataclass
@@ -32,6 +33,7 @@ class ModelConfig:
     vital_only: bool = False
     rnn_hidden: int = 64
     rnn_layers: int = 2
+    rnn_dropout: float | None = None  # None preserves the historical shared dropout setting.
     fusion: Literal["concat", "gated"] = "gated"
     embedding_dim: int = 128
     static_dim: int = 32
@@ -54,7 +56,6 @@ class TrainingConfig:
     seed: int = 20261010
     batch_size: int = 16
     epochs: int = 50
-    eval_batch_size: int = 0  # 0 reuses batch_size; evaluation does not retain gradients.
     patience: int = 8
     learning_rate: float = 3e-4
     weight_decay: float = 1e-4
@@ -63,16 +64,28 @@ class TrainingConfig:
     calibration: bool = False
     calibration_fraction: float = 0.5
     threshold: float | None = None
-    threshold_strategy: str = "max_f1"
+    threshold_strategy: str = "recall_constraint"
     target_recall: float = 0.80
     threshold_fraction: float = 0.30
     device: str = "auto"
     precision: str = "float32"
     deterministic: bool = True
-    allow_tf32: bool = False
     num_threads: int = 4
     log_every_steps: int = 100
     output_dir: str = "../runs"
+    protocol: str = "holdout"
+    cv_folds: int = 3
+    selection_metric: str = "auprc"
+    sampling: str = "original"
+    positive_fraction: float = 0.0625
+    positive_fraction_by_horizon: dict[int, float] = field(default_factory=dict)
+    steps_per_epoch: int = 128
+    max_positive_repeats: int = 16
+    numeric_cache_dir: str = "../runs/vital_numeric_cache"
+    use_numeric_cache: bool = False
+    loader_workers: int = 0
+    prefetch_factor: int = 2
+    bootstrap_replicates: int = 1000
 
 
 @dataclass
@@ -111,7 +124,13 @@ class Config:
             defaults = type(section)()
             for f in fields(section):
                 value, default = getattr(section, f.name), getattr(defaults, f.name)
-                if isinstance(default, bool):
+                if section is self.data and f.name == "horizons":
+                    good = isinstance(value, list) and all(type(x) is int and x in (1, 2, 3, 6) for x in value)
+                elif section is self.training and f.name == "positive_fraction_by_horizon":
+                    good = isinstance(value, dict) and all(
+                        str(k) in ("1", "2", "3", "6") and type(v) in (int, float) and 0 < v < 1
+                        for k, v in value.items())
+                elif isinstance(default, bool):
                     good = type(value) is bool
                 elif isinstance(default, int):
                     good = type(value) is int
@@ -127,6 +146,8 @@ class Config:
                     raise ValueError(f"Invalid type/value: {type(section).__name__}.{f.name}")
         if self.data.horizon not in (1, 2, 3, 6):
             raise ValueError("horizon must be 1, 2, 3 or 6 hours")
+        if len(set(self.data.horizons)) != len(self.data.horizons):
+            raise ValueError("horizons must not contain duplicates")
         encoders = {"tcn", "lstm", "gru", "grud", "news2", "xgboost"}
         if self.model.vital_encoder not in encoders or not set(self.training.models) <= encoders:
             raise ValueError("Models must be tcn, lstm, gru, grud, news2 or xgboost")
@@ -150,8 +171,6 @@ class Config:
             raise ValueError("Dropout probabilities must lie in [0, 1)")
         if self.training.learning_rate <= 0 or self.training.weight_decay < 0 or self.training.gradient_clip <= 0:
             raise ValueError("Invalid optimizer parameters")
-        if self.training.eval_batch_size < 0:
-            raise ValueError("eval_batch_size must be nonnegative (0 reuses batch_size)")
         if not 0 < self.training.calibration_fraction < 1:
             raise ValueError("calibration_fraction must lie in (0, 1)")
         from .evaluation.thresholds import STRATEGIES, validate_threshold
@@ -167,6 +186,27 @@ class Config:
             raise ValueError("Set threshold only with threshold_strategy: fixed")
         if not 0 <= self.training.seed < 2 ** 32:
             raise ValueError("seed must lie in [0, 2**32)")
+        if self.model.rnn_dropout is not None and not 0 <= self.model.rnn_dropout < 1:
+            raise ValueError("rnn_dropout must lie in [0, 1) or be null")
+        t = self.training
+        if t.protocol not in ("holdout", "patient_cv") or t.selection_metric not in ("auprc", "fpr_at_recall"):
+            raise ValueError("Unknown training protocol or selection metric")
+        if t.sampling not in ("original", "uniform_budget", "patient_time_balanced"):
+            raise ValueError("Unknown training sampling policy")
+        if t.cv_folds < 2 or t.loader_workers < 0 or t.prefetch_factor < 1 or t.bootstrap_replicates < 0:
+            raise ValueError("Invalid CV/loader/bootstrap settings")
+        if not 0 < t.positive_fraction < 1 or min(t.steps_per_epoch, t.max_positive_repeats) < 1:
+            raise ValueError("Invalid balanced sampling budget")
+        if t.sampling == "patient_time_balanced" and t.class_weight:
+            raise ValueError("Balanced sampling and automatic class_weight must not be combined")
+        if t.use_numeric_cache and not self.model.vital_only:
+            raise ValueError("Numeric memmap cache currently supports vital-only neural models")
+        if t.protocol == "patient_cv":
+            if (not self.model.vital_only or not set(t.models) <= {"tcn", "lstm", "gru", "grud"}
+                    or self.model.vital_encoder not in {"tcn", "lstm", "gru", "grud"}):
+                raise ValueError("patient_cv currently supports vital-only neural models; XGBoost is unchanged")
+            if t.calibration or t.threshold_strategy != "min_fp_recall" or t.selection_metric != "fpr_at_recall":
+                raise ValueError("patient_cv requires no calibration, min_fp_recall and fpr_at_recall")
         xgb = self.xgboost
         if any(getattr(xgb, name) <= 0 for name in ("num_boost_round", "early_stopping_rounds",
                 "max_depth", "max_bin", "batch_size", "nthread")) or xgb.max_bin < 2:
@@ -194,7 +234,11 @@ class Config:
         if not isinstance(raw, dict) or set(raw) - types.keys():
             raise ValueError("Unknown configuration sections")
         try:
-            return cls(**{k: types[k](**v) for k, v in raw.items()}).validate()
+            cfg = cls(**{k: types[k](**v) for k, v in raw.items()}).validate()
+            # JSON object keys are strings, YAML keys may be integers.
+            cfg.training.positive_fraction_by_horizon = {
+                int(k): v for k, v in cfg.training.positive_fraction_by_horizon.items()}
+            return cfg
         except TypeError as exc:
             raise ValueError(f"Invalid configuration field: {exc}") from exc
 
@@ -212,6 +256,7 @@ def load_config(path: str | Path, *, vital_only=None, models=None) -> Config:
             raw.setdefault("model", {})["vital_encoder"] = models[0]
     cfg = Config.from_dict(raw)
     for section, name in ((cfg.data, "root"), (cfg.text, "cache_dir"), (cfg.training, "output_dir"),
+                          (cfg.training, "numeric_cache_dir"),
                           (cfg.news2, "rules_file")):
         p = Path(getattr(section, name)).expanduser()
         setattr(section, name, str(p if p.is_absolute() else (path.parent / p).resolve()))

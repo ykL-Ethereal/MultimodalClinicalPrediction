@@ -177,6 +177,49 @@ class ExtractResultsTests(unittest.TestCase):
         self.assertEqual(row["status"], "unknown")
         self.assertIn("status.json", row["extraction_issues"])
 
+    def test_experiment_root_exports_all_horizons_and_cv_candidates(self):
+        batch = self.root / "experiments" / "patient_cv" / "20261117_200000_000000"
+        self.write(batch, "experiment_plan.json", {})
+        self.write(batch, "status.json", {"model": "gru", "status": "completed"})
+        for horizon in (1, 6):
+            hroot = batch / f"h{horizon}"
+            config = {"data": {"horizon": horizon}, "model": {"vital_encoder": "gru", "vital_only": True},
+                      "training": {"seed": 42, "sampling": "balanced", "target_recall": .8}}
+            cv = hroot / "cv" / "gru" / "20261117_200000_000001"
+            self.write(cv, "status.json", {"model": "gru", "status": "completed"})
+            self.write(cv, "cv_summary.json", {"config": config, "folds": [{"fold": 1}],
+                       "mean_fpr": .1, "std_fpr": .03, "mean_auprc": .4, "final_epochs": 3,
+                       "sha256": "saved-cv-digest"})
+            self.write(cv / "fold_1", "history.json", [{"epoch": 1}])
+            final = hroot / "final" / "gru" / "20261117_200000_000002"
+            self.write(final, "config.json", config)
+            self.write(final, "status.json", {"model": "gru", "status": "completed"})
+            self.write(final, "run_summary.json", {"cv_summary_sha256": "saved-cv-digest"})
+            self.write(final, "validation_report.json", {"metrics": {"auprc": .45}})
+            self.write(final, "test_report.json", {"metrics": {"fpr": .2}, "patient_bootstrap": {
+                "confidence": .95, "intervals": {"fpr": {"lower": .1, "upper": .3, "valid_replicates": 10}}}})
+            (final / "artifact").mkdir()
+        self.write(batch / "h6" / "cv" / "tcn" / "failed", "status.json", {"model": "tcn", "status": "failed"})
+
+        output = self.root / "out"
+        self.assertEqual(extract.main(["--runs-dir", str(batch), "--output-dir", str(output), "--latest"]), 0)
+        for stem, count in (("training_results", 2), ("cv_results", 3)):
+            with (output / f"{stem}.csv").open(encoding="utf-8-sig", newline="") as stream:
+                rows = list(csv.DictReader(stream))
+            self.assertEqual(len(rows), count)
+            grus = [row for row in rows if row["model"] == "gru"]
+            self.assertEqual({row["horizon_hours"] for row in grus}, {"1", "6"})
+            self.assertTrue(all(row["cv_summary_sha256"] == "saved-cv-digest" for row in grus))
+            if stem == "training_results":
+                self.assertEqual(grus[0]["test_fpr"], "0.2")
+                self.assertEqual(grus[0]["test_patient_bootstrap_fpr_lower"], "0.1")
+            else:
+                self.assertEqual(grus[0]["mean_fpr"], "0.1")
+                self.assertEqual(rows[-1]["status"], "failed")
+                self.assertEqual(rows[-1]["mean_fpr"], "")
+        result = json.loads((output / "cv_results.json").read_text(encoding="utf-8"))
+        self.assertEqual(result["runs"][0]["cv_summary"]["folds"], [{"fold": 1}])
+
 
 if __name__ == "__main__":
     unittest.main()

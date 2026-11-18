@@ -36,15 +36,3 @@ def autocast_context(device, precision):
     if device.type != "cuda" or precision == "float32":
         return nullcontext()
     return torch.autocast(device_type="cuda", dtype=getattr(torch, precision))
-
-
-def configure_tf32(enabled=False):
-    """Explicitly set (and reset) CUDA math policy between training runs."""
-    if hasattr(torch.backends.cuda.matmul, "fp32_precision"):
-        # PyTorch >= 2.9: do not mix the new precision API with allow_tf32.
-        precision = "tf32" if enabled else "ieee"
-        torch.backends.cuda.matmul.fp32_precision = precision
-        torch.backends.cudnn.conv.fp32_precision = precision
-    else:
-        torch.backends.cuda.matmul.allow_tf32 = enabled
-        torch.backends.cudnn.allow_tf32 = enabled

@@ -1,6 +1,6 @@
 # Final fixed cohort: raw numerical values; standardization is fitted on training patients.
 data:
-  root: ../data/Mutimodel_data/固定训练数据
+  root: ../data/Mutimodel_data/固定训练数据_30min
   horizon: 6  # Fixed cohort supports 1, 2, 3, 6; one task per run.
 text:
   backend: macbert
@@ -45,8 +45,7 @@ xgboost:
 training:
   models: [tcn, lstm, gru, grud, news2]  # NEWS2 is evaluated directly without training.
   seed: 42
-  batch_size: 128  # RTX 5060 Ti 8GB; reduce if unusually large note batches exhaust memory.
-  eval_batch_size: 256
+  batch_size: 16
   epochs: 50
   patience: 8
   learning_rate: 0.0003
@@ -54,11 +53,9 @@ training:
   gradient_clip: 1.0
   class_weight: false
   calibration: false
-  threshold_strategy: max_f1  # Maximize validation F1 without a recall constraint.
   threshold: null
   device: auto
   precision: auto
-  deterministic: false  # Enable cuDNN autotuning; true for deterministic experiments.
-  allow_tf32: true  # Accelerate FP32 CUDA matmul/convolutions alongside BF16 AMP.
+  deterministic: true  # false enables cuDNN autotuning; true requests deterministic experiments.
   output_dir: ../runs  # Each run creates <model>/<timestamp>/ here.
 

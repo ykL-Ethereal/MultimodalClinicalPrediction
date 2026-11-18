@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from ..accelerator import autocast_context, configure_tf32, resolve_device, resolve_precision
+from ..accelerator import autocast_context, resolve_device, resolve_precision
 from ..data.collate import collate_samples, move_batch
 from ..evaluation.calibration import sigmoid
 from ..evaluation.metrics import binary_metrics
@@ -29,16 +29,31 @@ def seed_everything(seed, num_threads=4, *, deterministic=True):
     torch.use_deterministic_algorithms(deterministic)
 
 
-def make_loader(dataset, batch_size, *, shuffle=False, seed=0, device="cpu"):
+def make_loader(dataset, batch_size, *, shuffle=False, seed=0, device="cpu", config=None):
     generator = torch.Generator().manual_seed(seed)
     pin_memory = resolve_device(device).type == "cuda"
     from ..data.fixed_dataset import FixedPreparedDataset, ShardBatchSampler
+    from ..data.vital_cache import CachedVitalDataset
+    workers = config.loader_workers if config is not None else 0
+    if workers and not isinstance(dataset, CachedVitalDataset):
+        raise ValueError("Worker prefetch requires the CPU-only memmap dataset")
+    options = {"num_workers": workers, "collate_fn": collate_samples, "generator": generator,
+               "pin_memory": pin_memory}
+    if workers:
+        options.update(persistent_workers=True, prefetch_factor=config.prefetch_factor)
+    if shuffle and config is not None and config.sampling == "uniform_budget":
+        from ..data.balanced_sampler import UniformBudgetBatchSampler
+        return DataLoader(dataset, batch_sampler=UniformBudgetBatchSampler(dataset, batch_size, seed,
+                          config.steps_per_epoch), **options)
+    if shuffle and config is not None and config.sampling == "patient_time_balanced":
+        from ..data.balanced_sampler import PatientTimeBatchSampler
+        sampler = PatientTimeBatchSampler(dataset, batch_size, seed, steps=config.steps_per_epoch,
+            positive_fraction=config.positive_fraction, max_positive_repeats=config.max_positive_repeats)
+        return DataLoader(dataset, batch_sampler=sampler, **options)
     if shuffle and isinstance(dataset, FixedPreparedDataset):
         return DataLoader(dataset, batch_sampler=ShardBatchSampler(dataset, batch_size, seed),
-                          num_workers=0, collate_fn=collate_samples, generator=generator,
-                          pin_memory=pin_memory)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0,
-                      collate_fn=collate_samples, generator=generator, pin_memory=pin_memory)
+                          **options)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, **options)
 
 
 @torch.inference_mode()
@@ -72,11 +87,11 @@ class TrainingResult:
 
 
 class Trainer:
-    def __init__(self, model, config, output_dir):
+    def __init__(self, model, config, output_dir, *, log_prefix=""):
         self.config = config
+        self.log_prefix = f"{log_prefix} " if log_prefix else ""
         self.device = resolve_device(config.device)
         self.precision = resolve_precision(self.device, config.precision)
-        configure_tf32(config.allow_tf32 and self.device.type == "cuda")
         self.model = model.to(self.device)
         self.output_dir = output_dir
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=config.learning_rate,
@@ -105,23 +120,26 @@ class Trainer:
         self.scaler.update()
         return float(loss.detach()), int(selected.sum()), float(norm)
 
-    def fit(self, train_dataset, validation_dataset):
+    def fit(self, train_dataset, validation_dataset=None):
         labels = train_dataset.y
         mask = train_dataset.label_mask & train_dataset.available.any(axis=1)
         if not mask.any():
             raise ValueError("No valid labelled training samples with a dynamic modality")
         weight = training_pos_weight(labels, mask) if self.config.class_weight else None
         pos_weight = torch.tensor(weight, device=self.device) if weight is not None else None
-        val_mask = validation_dataset.label_mask & validation_dataset.available.any(axis=1)
-        both_validation = len(np.unique(validation_dataset.y[val_mask])) == 2
+        if validation_dataset is not None:
+            val_mask = validation_dataset.label_mask & validation_dataset.available.any(axis=1)
+            both_validation = len(np.unique(validation_dataset.y[val_mask])) == 2
+        else:
+            both_validation = True
         both_training = len(np.unique(labels[mask])) == 2
         if not (both_validation and both_training):
             raise ValueError("Training requires both classes in training and selection validation")
-        metric = "auprc" if both_validation else "negative_log_loss" if val_mask.any() else "last_epoch_no_validation"
+        metric = self.config.selection_metric if validation_dataset is not None else "fixed_epochs_from_train_cv"
         train_loader = make_loader(train_dataset, self.config.batch_size, shuffle=True,
-                                   seed=self.config.seed, device=self.device)
-        val_loader = make_loader(validation_dataset, self.config.eval_batch_size or self.config.batch_size,
-                                 device=self.device)
+                                   seed=self.config.seed, device=self.device, config=self.config)
+        val_loader = (make_loader(validation_dataset, self.config.batch_size, device=self.device, config=self.config)
+                      if validation_dataset is not None else None)
         best, best_epoch, stale, history = -float("inf"), -1, 0, []
         for epoch in range(self.config.epochs):
             epoch_started = time.perf_counter()
@@ -135,21 +153,31 @@ class Trainer:
                 total += loss * n
                 count += n
                 if step_index % self.config.log_every_steps == 0:
-                    print(f"epoch={epoch + 1} batch={step_index}/{len(train_loader)} "
-                          f"samples={count} train_loss={total/count:.6f} "
-                          f"samples_per_second={count/(time.perf_counter()-epoch_started):.1f}", flush=True)
+                    print(f"{self.log_prefix}epoch={epoch + 1} batch={step_index}/{len(train_loader)} "
+                          f"samples={count} train_loss={total/count:.6f}", flush=True)
             if count == 0:
                 raise ValueError("No optimizer updates in this epoch")
             train_seconds = time.perf_counter() - epoch_started
-            validation_started = time.perf_counter()
-            predictions = collect_predictions(self.model, val_loader, self.device, precision=self.precision)
-            eligible = predictions["label_mask"] & predictions["valid"]
-            metrics = binary_metrics(predictions["targets"][eligible], sigmoid(predictions["logits"][eligible]))
-            score = metrics["auprc"] if both_validation else -metrics["log_loss"] if metrics["log_loss"] is not None else float(epoch)
+            if val_loader is None:
+                metrics, score = {"status": "not_evaluated_fixed_training_budget"}, float(epoch)
+            else:
+                predictions = collect_predictions(self.model, val_loader, self.device, precision=self.precision)
+                eligible = predictions["label_mask"] & predictions["valid"]
+                y, p = predictions["targets"][eligible], sigmoid(predictions["logits"][eligible])
+                metrics = binary_metrics(y, p)
+                score = metrics["auprc"]
+                if metric == "fpr_at_recall":
+                    from ..evaluation.thresholds import select_threshold
+                    operating = select_threshold(y, p, strategy="min_fp_recall", target_recall=self.config.target_recall)
+                    metrics["high_recall_selection"] = operating
+                    score = -operating["selection_metrics"]["fpr"]
             record = {"epoch": epoch + 1, "train_loss": total / count, "trained_samples": count,
                       "skipped_batches": skipped, "validation": metrics, "selection_score": score,
-                      "train_seconds": train_seconds, "train_samples_per_second": count / train_seconds,
-                      "validation_seconds": time.perf_counter() - validation_started}
+                      "training_seconds": train_seconds, "training_samples_per_second": count / train_seconds}
+            sampler = train_loader.batch_sampler
+            if hasattr(sampler, "audit"):
+                write_json(self.output_dir / f"sampling_epoch_{epoch + 1:03d}.json", sampler.audit)
+                np.save(self.output_dir / f"exposure_epoch_{epoch + 1:03d}.npy", sampler.exposure_counts, allow_pickle=False)
             history.append(record)
             if score > best:
                 best, best_epoch, stale = score, epoch + 1, 0
@@ -160,8 +188,8 @@ class Trainer:
                         "scaler": self.scaler.state_dict(),
                         "epoch": epoch + 1}, self.output_dir / "last.pt")
             write_json(self.output_dir / "history.json", history)
-            print(f"epoch={epoch + 1} train_loss={total/count:.6f} validation_status={metrics['status']} selection={score:.6f}", flush=True)
-            if stale >= self.config.patience:
+            print(f"{self.log_prefix}epoch={epoch + 1} train_loss={total/count:.6f} validation_status={metrics['status']} selection={score:.6f}", flush=True)
+            if val_loader is not None and stale >= self.config.patience:
                 break
         self.model.load_state_dict(torch.load(self.output_dir / "best.pt", map_location=self.device, weights_only=True))
         self.model.eval()

@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from ..accelerator import autocast_context, configure_tf32, resolve_device, resolve_precision
+from ..accelerator import autocast_context, resolve_device, resolve_precision
 from ..data.collate import move_batch
 from ..data.fixed_dataset import FixedPreparedDataset as PreparedDataset
 from ..evaluation.calibration import PlattCalibrator, sigmoid
@@ -22,7 +22,6 @@ class Predictor:
         self.is_xgb = self.config.model.vital_encoder == "xgboost"
         self.device = torch.device("cpu") if self.is_xgb else resolve_device(device)
         self.precision = "float32" if self.is_xgb else resolve_precision(self.device, precision or self.config.training.precision)
-        configure_tf32(self.config.training.allow_tf32 and self.device.type == "cuda")
         self.backend = self.cache = None
         if not self.config.model.vital_only:
             self.config.text.device = str(self.device)
@@ -36,7 +35,6 @@ class Predictor:
 
     @torch.inference_mode()
     def predict(self, bundle, *, rows=None, batch_size=16, diagnostics=False):
-        configure_tf32(self.config.training.allow_tf32 and self.device.type == "cuda")
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
         from ..data.fixed_adapter import FixedCohortBundle

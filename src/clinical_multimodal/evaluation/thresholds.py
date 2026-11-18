@@ -3,7 +3,7 @@ import numbers
 import numpy as np
 
 
-STRATEGIES = {"recall_constraint", "max_f1", "fixed"}
+STRATEGIES = {"recall_constraint", "min_fp_recall", "max_f1", "fixed"}
 
 
 def validate_threshold(threshold):
@@ -44,6 +44,7 @@ def classification_metrics(labels, probabilities, threshold):
             "precision": precision if len(y) else None, "recall": recall,
             "f1": 2 * tp / (2 * tp + fp + fn) if 2 * tp + fp + fn else (0.0 if len(y) else None),
             "specificity": tn / (tn + fp) if tn + fp else None,
+            "fpr": fp / (tn + fp) if tn + fp else None,
             "sensitivity": recall, "ppv": precision if pred.any() else None}
 
 
@@ -63,7 +64,7 @@ def select_threshold(labels, probabilities, *, strategy="recall_constraint", tar
     else:
         if set(np.unique(y)) != {0, 1}:
             raise ValueError("Automatic threshold selection requires both classes in independent validation")
-        if strategy == "recall_constraint" and (
+        if strategy in ("recall_constraint", "min_fp_recall") and (
                 isinstance(target_recall, (bool, np.bool_)) or not isinstance(target_recall, numbers.Real)
                 or not np.isfinite(target_recall) or not 0 < target_recall <= 1):
             raise ValueError("target_recall must lie in (0, 1]")
@@ -73,13 +74,14 @@ def select_threshold(labels, probabilities, *, strategy="recall_constraint", tar
         tp = np.cumsum(sorted_y, dtype=np.int64)[ends]
         count, positives = ends + 1, int(y.sum())
         precision, recall = tp / count, tp / positives
-        objective = precision if strategy == "recall_constraint" else 2 * tp / (count + positives)
-        eligible = recall >= target_recall if strategy == "recall_constraint" else np.ones(len(ends), bool)
+        objective = (-(count - tp) if strategy == "min_fp_recall" else
+                     precision if strategy == "recall_constraint" else 2 * tp / (count + positives))
+        eligible = recall >= target_recall if strategy in ("recall_constraint", "min_fp_recall") else np.ones(len(ends), bool)
         candidates = np.flatnonzero(eligible)
         # Boundaries descend, so argmax's first occurrence is the highest tied threshold.
         chosen = float(scores[ends[candidates[np.argmax(objective[candidates])]]])
     return {"threshold": chosen, "threshold_strategy": strategy,
-            "target_recall": float(target_recall) if strategy == "recall_constraint" else None,
+            "target_recall": float(target_recall) if strategy in ("recall_constraint", "min_fp_recall") else None,
             "selection_metrics": classification_metrics(y, p, chosen),
             "tie_break": "higher_threshold", "classification_rule": "p >= threshold",
             "unit": "window", "zero_predicted_positive_precision": 0.0}

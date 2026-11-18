@@ -8,12 +8,13 @@ import math
 import os
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 
 
 MODELS = ("tcn", "lstm", "gru", "grud", "xgboost", "news2")
 METRICS = (
     "status", "n", "positive", "negative", "auprc", "auroc", "brier", "log_loss",
-    "threshold", "sensitivity", "specificity", "ppv", "tp", "tn", "fp", "fn",
+    "threshold", "sensitivity", "specificity", "ppv", "tp", "tn", "fp", "fn", "fpr",
     "precision", "recall", "f1", "confusion_matrix", "confusion_matrix_order",
 )
 POLICY_FIELDS = (
@@ -42,16 +43,23 @@ def read_json(path, issues, expected=dict):
 
 
 def discover_runs(root):
-    """Stop at run directories; never traverse feature caches or artifacts."""
-    markers = {"status.json", "run_summary.json", "history.json", "test_report.json"}
+    """Descend into experiment batches and stop at individual runs."""
+    run_markers = {"status.json", "run_summary.json", "history.json",
+                   "validation_report.json", "test_report.json"}
+    batch_markers = {"experiment_plan.json", "experiment_state.json"}
+    ignored = {"artifact", "feature_cache", "macbert_cache", "vital_numeric_cache", "__pycache__"}
     for directory, children, files in os.walk(root):
-        if markers.intersection(files):
+        path = Path(directory)
+        if batch_markers.intersection(files):
+            children[:] = sorted(name for name in children if name not in ignored)
+        elif "cv_summary.json" in files or ("status.json" in files and path.parent.parent.name == "cv"):
             children[:] = []
-            yield Path(directory)
+            yield path, "cv"
+        elif run_markers.intersection(files):
+            children[:] = []
+            yield path, "training"
         else:
-            children[:] = sorted(name for name in children if name not in {
-                "artifact", "feature_cache", "macbert_cache", "__pycache__",
-            })
+            children[:] = sorted(name for name in children if name not in ignored)
 
 
 def history_fields(history, model, summary):
@@ -89,6 +97,17 @@ def metric_fields(row, prefix, metrics):
     metrics = metrics if isinstance(metrics, dict) else {}
     for key in METRICS:
         row[f"{prefix}_{key}"] = metrics.get(key)
+
+
+def bootstrap_fields(row, bootstrap):
+    bootstrap = bootstrap or {}
+    for key in ("confidence", "patients", "replicates"):
+        row[f"test_patient_bootstrap_{key}"] = bootstrap.get(key)
+    intervals = bootstrap.get("intervals") or {}
+    for metric in ("recall", "precision", "fpr", "fp"):
+        interval = intervals.get(metric) or {}
+        for key in ("lower", "upper", "valid_replicates"):
+            row[f"test_patient_bootstrap_{metric}_{key}"] = interval.get(key)
 
 
 def threshold_policy(directory, summary, reports, issues):
@@ -137,6 +156,8 @@ def extract_run(directory):
         "seed": summary.get("seed", training.get("seed")),
         "device": summary.get("device", training.get("device")),
         "precision": summary.get("precision", training.get("precision")),
+        "protocol": summary.get("protocol", training.get("protocol")),
+        "cv_summary_sha256": summary.get("cv_summary_sha256"),
         "selection_metric": summary.get("selection_metric"),
         **history_fields(history, model, summary),
         "parameters": summary.get("parameters"),
@@ -167,6 +188,7 @@ def extract_run(directory):
                 warning.get(key) if isinstance(warning, dict) else warning if key == "status" else None)
         n, positive = metrics.get("n"), metrics.get("positive")
         row[f"{split}_positive_rate"] = positive / n if n and positive is not None else None
+    bootstrap_fields(row, reports["test"].get("patient_bootstrap"))
     policy = threshold_policy(directory, summary, reports, issues)
     policy_fields(row, policy)
     artifact = directory / "artifact"
@@ -179,10 +201,40 @@ def extract_run(directory):
     return {"summary": row, "reports": reports, "threshold_policy": policy}
 
 
-def collect_results(root, *, models=None, vital_only=False, latest=False):
+def extract_cv(directory):
+    issues = []
+    status = read_json(directory / "status.json", issues) or {}
+    summary = read_json(directory / "cv_summary.json", issues) or {}
+    config = summary.get("config") or read_json(directory / "config.json", issues) or {}
+    model_config, training = config.get("model", {}), config.get("training", {})
+    model = model_config.get("vital_encoder") or status.get("model") or directory.parent.name
+    if model not in MODELS:
+        return None
+    if not summary and status.get("status") == "completed":
+        issues.append("missing CV summary")
+    folds = summary.get("folds")
+    row = {
+        "model": model, "mode": "vital_only" if model_config.get("vital_only", True) else "multimodal",
+        "run_id": directory.name, "status": status.get("status", "unknown"),
+        "horizon_hours": config.get("data", {}).get("horizon"), "seed": training.get("seed"),
+        "sampling": training.get("sampling"), "target_recall": training.get("target_recall"),
+        "folds": len(folds) if isinstance(folds, list) else None, "protocol": summary.get("protocol"),
+        "selection_metric": summary.get("selection_metric"),
+        "mean_fpr": summary.get("mean_fpr"), "std_fpr": summary.get("std_fpr"),
+        "mean_auprc": summary.get("mean_auprc"), "final_epochs": summary.get("final_epochs"),
+        "cv_summary_sha256": summary.get("sha256"), "run_dir": str(directory.resolve()),
+        "error_type": status.get("error_type"), "error": status.get("error"),
+        "extraction_issues": "; ".join(issues),
+    }
+    return {"summary": row, "cv_summary": summary}
+
+
+def collect_results(root, *, models=None, vital_only=False, latest=False, include_cv=False):
     records = []
-    for directory in sorted(discover_runs(root)):
-        record = extract_run(directory)
+    for directory, kind in discover_runs(root):
+        if kind == "cv" and not include_cv:
+            continue
+        record = extract_cv(directory) if kind == "cv" else extract_run(directory)
         if record is None:
             continue
         row = record["summary"]
@@ -196,6 +248,8 @@ def collect_results(root, *, models=None, vital_only=False, latest=False):
         for record in records:
             row = record["summary"]
             key = (row["mode"], row["model"], row["horizon_hours"], row["seed"])
+            if "cv_summary" in record:
+                key += (row["sampling"], row["target_recall"])
             if key not in selected or row["run_id"] > selected[key]["summary"]["run_id"]:
                 selected[key] = record
         records = list(selected.values())
@@ -203,55 +257,74 @@ def collect_results(root, *, models=None, vital_only=False, latest=False):
                   item["summary"]["model"], item["summary"]["run_id"]))
 
 
+def write_results(directory, stem, root, records):
+    csv_path, json_path = directory / f"{stem}.csv", directory / f"{stem}.json"
+    rows = [record["summary"] for record in records]
+    with TemporaryDirectory(dir=directory) as staging:
+        staged_csv, staged_json = Path(staging) / csv_path.name, Path(staging) / json_path.name
+        # BOM lets Excel recognize UTF-8 paths and messages on Windows.
+        with staged_csv.open("w", encoding="utf-8-sig", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows({key: json.dumps(value, ensure_ascii=False, allow_nan=False)
+                              if isinstance(value, (list, dict)) else value
+                              for key, value in row.items()} for row in rows)
+        with staged_json.open("w", encoding="utf-8") as stream:
+            json.dump({"runs_root": str(root.resolve()), "runs": records},
+                      stream, ensure_ascii=False, indent=2, allow_nan=False)
+            stream.write("\n")
+        staged_csv.replace(csv_path)
+        staged_json.replace(json_path)
+    print(f"\nExtracted {len(rows)} runs. CSV: {csv_path.resolve()}\nJSON: {json_path.resolve()}")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Extract saved training results into CSV and JSON.")
-    parser.add_argument("--runs-dir", type=Path, default=PROJECT_ROOT / "runs",
-                        help="Runs root or one run directory (default: project runs/)")
+    parser.add_argument("--runs-dir", type=Path, default=PROJECT_ROOT / "runs" / "patient_cv_30min",
+                        help="Runs root, experiment batch or individual run (default: runs/patient_cv_30min)")
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "runs" / "results",
                         help="Summary output directory (default: project runs/results/)")
     parser.add_argument("--models", nargs="+", choices=MODELS)
     parser.add_argument("--vital-only", action="store_true")
     parser.add_argument("--latest", action="store_true",
-                        help="Keep newest run per mode/model/horizon/seed, including unfinished runs")
+                        help="Keep newest run per mode/model/horizon/seed and CV sampling/target recall")
     args = parser.parse_args(argv)
     if not args.runs_dir.is_dir():
         parser.error(f"Runs directory does not exist: {args.runs_dir}")
     records = collect_results(args.runs_dir, models=args.models,
-                              vital_only=args.vital_only, latest=args.latest)
+                              vital_only=args.vital_only, latest=args.latest, include_cv=True)
     if not records:
         print("No matching runs found; no output written.", file=sys.stderr)
         return 1
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    csv_path, json_path = (args.output_dir / "training_results.csv",
-                           args.output_dir / "training_results.json")
-    rows = [record["summary"] for record in records]
-    # BOM lets Excel recognize UTF-8 paths and messages on Windows.
-    with csv_path.open("w", encoding="utf-8-sig", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
-        writer.writeheader()
-        # Keep structured metrics (e.g. confusion matrices) machine-readable in CSV.
-        writer.writerows({key: json.dumps(value, ensure_ascii=False, allow_nan=False)
-                          if isinstance(value, (list, dict)) else value
-                          for key, value in row.items()} for row in rows)
-    with json_path.open("w", encoding="utf-8") as stream:
-        json.dump({"runs_root": str(args.runs_dir.resolve()), "runs": records},
-                  stream, ensure_ascii=False, indent=2, allow_nan=False)
-        stream.write("\n")
+    training = [record for record in records if "reports" in record]
+    cv = [record for record in records if "cv_summary" in record]
+    if cv:
+        write_results(args.output_dir, "cv_results", args.runs_dir, cv)
+    if training:
+        write_results(args.output_dir, "training_results", args.runs_dir, training)
+        print_training_results(training)
+    for record in records:
+        row = record["summary"]
+        if row["error"] or row["extraction_issues"]:
+            message = " | ".join(filter(None, (row["error"], row["extraction_issues"])))
+            print(f"  NOTE [{row['run_id']}]: {message}", file=sys.stderr)
+    return 0
+
+
+def print_training_results(records):
     display = (("validation_auprc", "Val AUPRC"), ("test_auprc", "Test AUPRC"),
                ("test_auroc", "Test AUROC"), ("test_threshold", "Threshold"),
-               ("test_precision", "Precision"), ("test_recall", "Recall"), ("test_f1", "F1"))
-    print(f"{'Model':<9} {'Mode':<11} {'Status':<10} "
+               ("test_precision", "Precision"), ("test_recall", "Recall"), ("test_fpr", "FPR"), ("test_f1", "F1"))
+    print(f"\n{'Model':<9} {'Mode':<11} {'Horizon':>7} {'Status':<10} "
           + " ".join(f"{title:>11}" for _, title in display))
-    for row in rows:
+    for record in records:
+        row = record["summary"]
         values = [f"{row[key]:.6f}" if row[key] is not None else "-"
                   for key, _ in display]
-        print(f"{row['model']:<9} {row['mode']:<11} {row['status']:<10} "
+        horizon = "-" if row["horizon_hours"] is None else f"{row['horizon_hours']}h"
+        print(f"{row['model']:<9} {row['mode']:<11} {horizon:>7} {row['status']:<10} "
               + " ".join(f"{value:>11}" for value in values) + f"  {row['run_id']}")
-        if row["error"] or row["extraction_issues"]:
-            print(f"  NOTE: {row['error'] or ''} {row['extraction_issues']}", file=sys.stderr)
-    print(f"\nExtracted {len(rows)} runs. Existing summary files are replaced on each extraction.")
-    print(f"CSV:  {csv_path.resolve()}\nJSON: {json_path.resolve()}")
-    return 0
 
 
 if __name__ == "__main__":

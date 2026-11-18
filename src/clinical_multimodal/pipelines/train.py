@@ -23,6 +23,9 @@ from .threshold import validation_partition, partition_record, fit_threshold, ev
 
 
 def train_pipeline(config):
+    if config.training.protocol == "patient_cv":
+        from .patient_cv import cv_pipeline
+        return cv_pipeline(config)
     if config.model.vital_encoder == "xgboost":
         from .xgboost import xgboost_pipeline
         return xgboost_pipeline(config)
@@ -51,9 +54,7 @@ def _train_pipeline(config):
     write_json(output / "config.json", config.to_dict())
     print(f"training_device={config.training.device} precision={config.training.precision} "
           f"text_device={config.text.device if not config.model.vital_only else 'disabled'} "
-          f"deterministic={config.training.deterministic} allow_tf32={config.training.allow_tf32} "
-          f"batch_size={config.training.batch_size} "
-          f"eval_batch_size={config.training.eval_batch_size or config.training.batch_size}", flush=True)
+          f"deterministic={config.training.deterministic}", flush=True)
     seed_everything(config.training.seed, config.training.num_threads, deterministic=config.training.deterministic)
     started = time.perf_counter()
     bundle, preprocessor, backend, cache = prepare(config)
@@ -63,9 +64,7 @@ def _train_pipeline(config):
     if len(selection_rows) == 0 or len(bundle.rows("train")) == 0:
         raise ValueError("Training and selection validation must both be nonempty")
     dataset_options = {"defer_numeric": torch.device(config.training.device).type == "cuda"}
-    eval_batch_size = config.training.eval_batch_size or config.training.batch_size
-    datasets = {"train": PreparedDataset(bundle, bundle.rows("train"), preprocessor, cache, config.data.horizon,
-                                         include_metadata=False, **dataset_options),
+    datasets = {"train": PreparedDataset(bundle, bundle.rows("train"), preprocessor, cache, config.data.horizon, **dataset_options),
                 "validation": PreparedDataset(bundle, selection_rows, preprocessor, cache, config.data.horizon, **dataset_options)}
     model = make_risk_model(config.model, len(bundle.contract.vital_names), len(bundle.contract.lab_names),
                             backend.dimension if backend else 0, vital_channels=preprocessor.output_vital_channels)
@@ -78,13 +77,13 @@ def _train_pipeline(config):
     calibrator = None
     if len(calibration_rows):
         calibration_data = PreparedDataset(bundle, calibration_rows, preprocessor, cache, config.data.horizon, **dataset_options)
-        collected = collect_predictions(model, make_loader(calibration_data, eval_batch_size, device=trainer.device),
+        collected = collect_predictions(model, make_loader(calibration_data, config.training.batch_size, device=trainer.device),
                                         trainer.device, precision=trainer.precision)
         valid = collected["label_mask"] & collected["valid"]
         calibrator = PlattCalibrator.fit(collected["logits"][valid], collected["targets"][valid])
     decision_rows = threshold_rows if len(threshold_rows) else selection_rows
     decision_data = PreparedDataset(bundle, decision_rows, preprocessor, cache, config.data.horizon, **dataset_options)
-    decision_predictions = collect_predictions(model, make_loader(decision_data, eval_batch_size,
+    decision_predictions = collect_predictions(model, make_loader(decision_data, config.training.batch_size,
         device=trainer.device), trainer.device, precision=trainer.precision)
     policy = fit_threshold(bundle, config, decision_rows, decision_predictions, calibrator, partitions)
     write_json(output / "threshold.json", policy)
@@ -95,7 +94,7 @@ def _train_pipeline(config):
         rows = selection_rows if split == "validation" else bundle.rows("test")
         if len(rows):
             dataset = datasets["validation"] if split == "validation" else PreparedDataset(bundle, rows, preprocessor, cache, config.data.horizon, **dataset_options)
-            collected = collect_predictions(model, make_loader(dataset, eval_batch_size, device=trainer.device),
+            collected = collect_predictions(model, make_loader(dataset, config.training.batch_size, device=trainer.device),
                                             trainer.device, precision=trainer.precision)
             valid = collected["label_mask"] & collected["valid"]
             logits = collected["logits"][valid]
@@ -120,8 +119,6 @@ def _train_pipeline(config):
               "gpu_name": torch.cuda.get_device_name(trainer.device) if trainer.device.type == "cuda" else None,
               "text_device": str(backend.device) if backend else None, "text_precision": backend.precision if backend else None,
               "deterministic": config.training.deterministic,
-              "allow_tf32": config.training.allow_tf32,
-              "batch_size": config.training.batch_size, "eval_batch_size": eval_batch_size,
               "parameters": sum(p.numel() for p in model.parameters()),
               "best_epoch": result.best_epoch, "selection_metric": result.selection_metric,
               "pos_weight": result.pos_weight, "seed": config.training.seed,

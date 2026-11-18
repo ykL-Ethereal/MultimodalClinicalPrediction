@@ -30,10 +30,11 @@ class VitalRNN(nn.Module):
     def __init__(self, config, *, input_channels):
         super().__init__()
         self.max_time_steps = config.max_time_steps
+        recurrent_dropout = config.dropout if config.rnn_dropout is None else config.rnn_dropout
         recurrent = {"lstm": nn.LSTM, "gru": nn.GRU}[config.vital_encoder]
         self.rnn = recurrent(input_channels, config.rnn_hidden, config.rnn_layers,
                              batch_first=True, bidirectional=False,
-                             dropout=config.dropout if config.rnn_layers > 1 else 0.)
+                             dropout=recurrent_dropout if config.rnn_layers > 1 else 0.)
         self.project = nn.Sequential(nn.Dropout(config.dropout),
                                      nn.Linear(config.rnn_hidden * 2, config.embedding_dim))
 
